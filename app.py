@@ -82,6 +82,11 @@ defaults = {
     "api_key": "", "gemini_ready": False,
     "last_result": None, "level_detect_questions": [],
     "asked_questions": [], "asked_topics": [],
+    "starting_level": None,       # for Before/After Mirror
+    "consecutive_wrong": 0,       # for NOVA brain recovery
+    "tiny_level_index": 0,        # for Tiny Level System
+    "nova_message": None,         # current NOVA message
+    "session_start_time": None,   # for anti-social-media timer
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -106,8 +111,11 @@ def init_gemini(api_key):
         return False
 
 def ask_gemini(prompt, temperature=1.0):
+    api_key = st.session_state.get("api_key", "")
+    if not api_key:
+        return ""  # No key — use question bank silently
     try:
-        client = genai.Client(api_key=st.session_state["api_key"])
+        client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
             model="gemini-2.0-flash-lite",
             contents=prompt,
@@ -117,8 +125,8 @@ def ask_gemini(prompt, temperature=1.0):
             )
         )
         return response.text.strip()
-    except Exception as e:
-        return ""
+    except Exception:
+        return ""  # Any error — fall back to bank silently
 
 # ─────────────────────────────────────────
 #  QUESTION BANK (guaranteed unique, no API needed)
@@ -265,10 +273,238 @@ def update_flow_score(is_correct, score):
     if new < 25: new = min(35, new + 5)
     return new
 
-REWARD_MESSAGES = {
-    "correct": ["🎉 Brilliant! You nailed it!", "⚡ Excellent! Keep going!", "🔥 That's exactly right!", "🌟 Perfect! You're in flow!", "💥 Unstoppable! On fire!"],
-    "wrong":   ["💡 Great attempt! Here's the key:", "👏 Brave try! Every mistake teaches:", "🧩 Almost there! Let's understand:", "🌱 Learning in progress! Here's why:", "✨ Good effort! The answer shows:"],
+# ─────────────────────────────────────────
+#  🤖 NOVA — AI COACH CHARACTER
+# ─────────────────────────────────────────
+def get_nova_message(q_count, correct_count, consecutive_wrong,
+                     flow_score, level, subject, mood):
+    """NOVA speaks only at the RIGHT psychological moments"""
+    import time
+
+    # Session start (first question)
+    if q_count == 0:
+        mood_openers = {
+            "😊 Energetic": f"Your energy is perfect right now. Let's use it — {subject} awaits.",
+            "😴 Tired":     "Tired brain still beats no brain. Even 5 questions rewires you. Let's go.",
+            "🎯 Focused":   f"Focus mode detected. I'm giving you clean, precise {subject} questions. Let's lock in.",
+            "😰 Stressed":  "Stress is just energy without direction. Let me redirect yours into learning.",
+        }
+        return "👋", "#7c6af7", mood_openers.get(mood, f"Welcome back. Let's build something in your brain today.")
+
+    # 3 consecutive wrong — Brain Recovery
+    if consecutive_wrong >= 3:
+        return "🧠", "#06b6d4", f"Hey — 3 misses in a row means your brain needs a reset, not more pressure. I'm switching to easier questions. Come back stronger."
+
+    # First correct after wrong streak
+    if consecutive_wrong == 0 and q_count > 3 and correct_count > 0:
+        if st.session_state.get("just_recovered"):
+            st.session_state["just_recovered"] = False
+            return "💚", "#6af7b8", "There it is. That's the one that breaks the streak. Your brain just remembered how to win."
+
+    # Perfect accuracy milestone
+    if q_count == 5 and correct_count == 5:
+        return "⚡", "#f7c06a", f"5 for 5. Perfect. I'm officially pushing you harder — you've earned the next level."
+
+    # Speed insight (every 4 questions)
+    if q_count > 0 and q_count % 4 == 0:
+        acc = int(correct_count / q_count * 100)
+        if acc == 100:
+            return "🔥", "#f7c06a", f"Perfect run at {q_count} questions. In this session, you ARE the topper. Keep it going."
+        elif acc >= 70:
+            return "🌊", "#7c6af7", f"{acc}% accuracy. You're in the flow zone — the sweet spot where real learning happens."
+        elif acc < 40:
+            return "🌱", "#06b6d4", f"Struggling is not failing — it's your brain building new paths. Keep going. I've got you."
+
+    # Anti-social-media milestone
+    if q_count == 7:
+        return "📱", "#6af7b8", "You've been studying longer than the average Instagram session. Your dopamine is now working FOR you, not against you."
+
+    return None, None, None
+
+def render_nova(q_count, correct_count, consecutive_wrong,
+                flow_score, level, subject, mood):
+    """Render NOVA message if triggered"""
+    emoji, color, msg = get_nova_message(
+        q_count, correct_count, consecutive_wrong, flow_score, level, subject, mood)
+    if not msg:
+        return
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,rgba(124,106,247,0.08),rgba(6,182,212,0.05));
+        border-left:3px solid {color}; border-radius:0 12px 12px 0;
+        padding:0.9rem 1.1rem; margin-bottom:0.85rem;
+        display:flex; gap:0.75rem; align-items:flex-start;">
+        <div style="font-size:1.4rem; line-height:1;">{emoji}</div>
+        <div>
+            <div style="font-family:'Space Mono',monospace; font-size:0.7rem;
+                color:{color}; letter-spacing:0.1em; margin-bottom:0.25rem;">NOVA · AI COACH</div>
+            <div style="font-size:0.9rem; color:#c8c8d8; line-height:1.5; font-style:italic;">
+                "{msg}"
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────
+#  🎮 TINY LEVEL SYSTEM
+# ─────────────────────────────────────────
+TINY_LEVELS = {
+    "Mathematics": {
+        "beginner":  ["Basic Arithmetic","Fractions & Decimals","Percentages","Geometry Basics","LCM & HCF","Boss: Mixed Test"],
+        "moderate":  ["Linear Equations","Quadratic Equations","Coordinate Geometry","Statistics","Probability","Boss: Algebra Master"],
+        "advanced":  ["Derivatives","Integration","Matrices","Complex Numbers","Binomial Theorem","Boss: Final Exam"],
+    },
+    "Science": {
+        "beginner":  ["Photosynthesis","Human Body","Planets & Space","States of Matter","Basic Electricity","Boss: Science Quiz"],
+        "moderate":  ["Newton's Laws","Chemical Bonding","Cell Biology","Periodic Table","Electromagnetic Waves","Boss: Science Master"],
+        "advanced":  ["Organic Chemistry","Quantum Mechanics","Genetics","Nuclear Physics","Electrochemistry","Boss: Expert Challenge"],
+    },
+    "General Knowledge": {
+        "beginner":  ["Indian Capitals","National Symbols","Famous Inventions","World Geography","Sports & Culture","Boss: GK Quiz"],
+        "moderate":  ["Indian History","Constitution","Space Missions","World Leaders","International Orgs","Boss: GK Master"],
+        "advanced":  ["Foreign Policy","Global Economics","Advanced History","International Law","Current Affairs","Boss: GK Legend"],
+    },
 }
+
+def render_tiny_levels(subject, level, q_count):
+    """Show game-style level map"""
+    levels = TINY_LEVELS.get(subject, TINY_LEVELS["General Knowledge"]).get(level, [])
+    if not levels:
+        return
+
+    current = min(q_count // 2, len(levels) - 1)
+
+    rows = []
+    for i, name in enumerate(levels):
+        is_boss = (i == len(levels) - 1)
+        prefix = "BOSS " if is_boss else f"Lv.{i+1}"
+
+        if i < current:
+            bg = "rgba(106,247,184,0.12)"
+            border = "#6af7b8"
+            color = "#6af7b8"
+            icon = "✅"
+            you = ""
+        elif i == current:
+            bg = "rgba(124,106,247,0.15)"
+            border = "#7c6af7"
+            color = "#e8e8f0"
+            icon = "⚔️" if is_boss else "▶"
+            you = '<span style="margin-left:auto;font-family:Space Mono,monospace;font-size:0.7rem;color:#7c6af7;">YOU</span>'
+        else:
+            bg = "rgba(255,255,255,0.02)"
+            border = "#2a2a38"
+            color = "#4a4a58"
+            icon = "🔒"
+            you = ""
+
+        bold = "font-weight:700;" if i == current else ""
+        row = (
+            f'<div style="display:flex;align-items:center;gap:0.6rem;padding:0.45rem 0.7rem;'
+            f'background:{bg};border:1px solid {border};border-radius:8px;'
+            f'font-size:0.8rem;color:{color};{bold}">'
+            f'<span>{icon}</span>'
+            f'<span>{prefix} {name}</span>'
+            f'{you}'
+            f'</div>'
+        )
+        rows.append(row)
+
+    rows_html = "\n".join(rows)
+    subj_upper = subject.upper()
+
+    html = (
+        f'<div style="background:#13131a;border:1px solid #2a2a38;border-radius:14px;'
+        f'padding:0.9rem;margin-bottom:0.85rem;">'
+        f'<div style="font-family:Space Mono,monospace;font-size:0.7rem;color:#6b6b80;'
+        f'letter-spacing:0.1em;margin-bottom:0.6rem;">🎮 LEVEL MAP · {subj_upper}</div>'
+        f'<div style="display:flex;flex-direction:column;gap:0.35rem;">'
+        f'{rows_html}'
+        f'</div></div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────
+#  📈 BEFORE/AFTER MIRROR
+# ─────────────────────────────────────────
+def render_before_after(starting_level, current_level,
+                        starting_acc, current_acc, q_total, subject):
+    level_order = {"beginner": 0, "moderate": 1, "advanced": 2}
+    level_up = level_order.get(current_level, 0) > level_order.get(starting_level, 0)
+
+    level_pct = {"beginner": 20, "moderate": 55, "advanced": 90}
+    start_pct = level_pct.get(starting_level, 20)
+    end_pct   = level_pct.get(current_level, 20)
+
+    if level_up:
+        transform_msg = "You walked in as " + starting_level.title() + ". You leave as " + current_level.title() + ". That happened in one session."
+        transform_color = "#6af7b8"
+        transform_icon = "🚀"
+    elif current_acc >= 80:
+        transform_msg = "Same level, but " + str(current_acc) + "% accuracy. You didn't just answer questions — you proved mastery."
+        transform_color = "#f7c06a"
+        transform_icon = "⚡"
+    elif q_total >= 5:
+        transform_msg = "You answered " + str(q_total) + " questions today. Every single one rewired your brain. You are different now."
+        transform_color = "#7c6af7"
+        transform_icon = "🧠"
+    else:
+        transform_msg = "You showed up. In a world full of distractions, that alone makes you different."
+        transform_color = "#06b6d4"
+        transform_icon = "🌱"
+
+    start_label = starting_level.upper()
+    end_label   = current_level.upper()
+
+    html = (
+        '<div style="background:linear-gradient(135deg,#13131a,#1a1a24);'
+        'border:1.5px solid #2a2a38;border-radius:18px;padding:1.4rem;margin:1rem 0;">'
+
+        '<div style="font-family:Space Mono,monospace;font-size:0.72rem;'
+        'color:#6b6b80;letter-spacing:0.1em;margin-bottom:1rem;">'
+        '📈 YOUR TRANSFORMATION THIS SESSION</div>'
+
+        '<div style="display:grid;grid-template-columns:1fr auto 1fr;'
+        'gap:0.75rem;align-items:center;margin-bottom:1rem;">'
+
+        '<div style="text-align:center;background:rgba(255,255,255,0.03);'
+        'border-radius:12px;padding:0.75rem;">'
+        '<div style="font-size:0.7rem;color:#6b6b80;margin-bottom:0.3rem;">WHEN YOU STARTED</div>'
+        '<div style="font-family:Space Mono,monospace;font-weight:700;'
+        'color:#6b6b80;font-size:1rem;">' + start_label + '</div></div>'
+
+        '<div style="font-size:1.5rem;color:' + transform_color + ';text-align:center;">' + transform_icon + '</div>'
+
+        '<div style="text-align:center;background:rgba(124,106,247,0.08);'
+        'border:1px solid ' + transform_color + '44;border-radius:12px;padding:0.75rem;">'
+        '<div style="font-size:0.7rem;color:#6b6b80;margin-bottom:0.3rem;">RIGHT NOW</div>'
+        '<div style="font-family:Space Mono,monospace;font-weight:700;'
+        'color:' + transform_color + ';font-size:1rem;">' + end_label + '</div></div>'
+        '</div>'
+
+        '<div style="background:rgba(0,0,0,0.3);border-radius:99px;height:8px;'
+        'margin-bottom:0.4rem;overflow:hidden;position:relative;">'
+        '<div style="position:absolute;left:0;top:0;height:100%;width:' + str(start_pct) + '%;'
+        'background:#4a4a58;border-radius:99px;"></div>'
+        '<div style="position:absolute;left:0;top:0;height:100%;width:' + str(end_pct) + '%;'
+        'background:linear-gradient(90deg,#7c6af7,' + transform_color + ');'
+        'border-radius:99px;box-shadow:0 0 8px ' + transform_color + '66;"></div>'
+        '</div>'
+
+        '<div style="display:flex;justify-content:space-between;'
+        'font-size:0.7rem;color:#4a4a58;margin-bottom:0.9rem;">'
+        '<span>Beginner</span><span>Moderate</span><span>Advanced</span></div>'
+
+        '<div style="padding:0.75rem;background:rgba(255,255,255,0.03);'
+        'border-radius:10px;border-left:3px solid ' + transform_color + ';">'
+        '<div style="font-size:0.9rem;color:#c8c8d8;line-height:1.6;font-style:italic;">'
+        '"' + transform_msg + '"</div>'
+        '<div style="font-family:Space Mono,monospace;font-size:0.72rem;'
+        'color:#6b6b80;margin-top:0.4rem;">— NOVA</div>'
+        '</div></div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
 
 def get_next_question(subject, level):
     """Get next unique question — tries Gemini first, falls back to bank."""
@@ -350,29 +586,27 @@ def screen_welcome():
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown('<div class="nf-card">', unsafe_allow_html=True)
-    st.markdown("**🔑 Enter your Gemini API Key**")
-    st.markdown('<p style="color:#6b6b80; font-size:0.85rem;">Get it free at aistudio.google.com — never stored beyond this session.</p>', unsafe_allow_html=True)
-    api_key = st.text_input("API Key", type="password", placeholder="AIzaSy...", label_visibility="collapsed")
-    st.markdown('</div>', unsafe_allow_html=True)
+    # API Key — optional, enables Gemini AI questions
+    with st.expander("🔑 Add Gemini API Key (optional — for AI-generated questions)", expanded=False):
+        st.markdown('<p style="color:#6b6b80; font-size:0.85rem;">Get free at aistudio.google.com · Leave blank to use built-in question bank</p>', unsafe_allow_html=True)
+        api_key = st.text_input("API Key", type="password", placeholder="AIzaSy...", label_visibility="collapsed")
 
     st.markdown('<div class="nf-card">', unsafe_allow_html=True)
     st.markdown("**📚 Choose your subject**")
     subject = st.selectbox("Subject", ["Mathematics", "Science", "General Knowledge"], label_visibility="collapsed")
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # Stats display
     if st.session_state["streak"] > 0:
         st.markdown(f'<div style="text-align:center; margin-bottom:1rem;"><span style="font-size:1.5rem;">🔥</span><span style="font-family:Space Mono,monospace; color:#f7c06a;"> {st.session_state["streak"]} day streak!</span></div>', unsafe_allow_html=True)
 
     if st.button("🚀 Start Learning"):
-        if not api_key:
-            st.error("Please enter your Gemini API Key to continue.")
-        else:
-            st.session_state["api_key"] = api_key
-            st.session_state["subject"] = subject
-            st.session_state["gemini_ready"] = True  # trust the key, validate on first use
-            st.session_state["screen"] = "mood"
-            st.rerun()
+        # API key is optional — app works with question bank without it
+        st.session_state["api_key"] = api_key if api_key else ""
+        st.session_state["subject"] = subject
+        st.session_state["gemini_ready"] = True
+        st.session_state["screen"] = "mood"
+        st.rerun()
 
 # ─────────────────────────────────────────
 #  SCREEN 2: MOOD
@@ -442,32 +676,163 @@ def screen_level_detect():
             st.rerun()
 
 # ─────────────────────────────────────────
-#  SCREEN 4: SESSION
+#  XP SYSTEM
+# ─────────────────────────────────────────
+XP_LEVELS = [
+    (0,    "🌱 Seedling",    "#6af7b8"),
+    (50,   "⚡ Spark",       "#7c6af7"),
+    (120,  "🔥 Flame",       "#f7c06a"),
+    (250,  "🌊 Flow Master", "#06b6d4"),
+    (500,  "🧠 NeuroLegend", "#f76a6a"),
+]
+
+def get_xp_level(xp):
+    current = XP_LEVELS[0]
+    for threshold, name, color in XP_LEVELS:
+        if xp >= threshold:
+            current = (threshold, name, color)
+    idx = next((i for i,(t,n,c) in enumerate(XP_LEVELS) if t == current[0]), 0)
+    next_threshold = XP_LEVELS[idx+1][0] if idx+1 < len(XP_LEVELS) else current[0]+500
+    progress = min(100, int((xp - current[0]) / (next_threshold - current[0]) * 100))
+    return current[1], current[2], progress, next_threshold
+
+def render_xp_bar(xp):
+    name, color, progress, next_xp = get_xp_level(xp)
+    st.markdown(f"""
+    <div style="background:#1a1a24; border:1px solid #2a2a38; border-radius:14px; padding:0.9rem 1.2rem; margin-bottom:0.75rem;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.4rem;">
+            <span style="font-weight:700; color:{color}; font-size:0.95rem;">{name}</span>
+            <span style="font-family:'Space Mono',monospace; color:#6b6b80; font-size:0.8rem;">{xp} XP → {next_xp} XP</span>
+        </div>
+        <div style="background:#0a0a0f; border-radius:99px; height:10px; overflow:hidden;">
+            <div style="width:{progress}%; height:100%; border-radius:99px;
+                background:linear-gradient(90deg,{color},{color}99);
+                transition:width 0.8s ease; box-shadow:0 0 8px {color}66;"></div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+def confetti_js():
+    """Inject confetti animation via JavaScript"""
+    st.markdown("""
+    <script>
+    (function() {
+        const colors = ['#7c6af7','#6af7b8','#f7c06a','#f76a6a','#06b6d4'];
+        const container = document.body;
+        for (let i = 0; i < 80; i++) {
+            const el = document.createElement('div');
+            el.style.cssText = `
+                position:fixed; top:-10px;
+                left:${Math.random()*100}vw;
+                width:${6+Math.random()*8}px;
+                height:${6+Math.random()*8}px;
+                background:${colors[Math.floor(Math.random()*colors.length)]};
+                border-radius:${Math.random()>0.5?'50%':'2px'};
+                z-index:9999; pointer-events:none;
+                animation:fall ${1.5+Math.random()*2}s ease-in forwards;
+                animation-delay:${Math.random()*0.5}s;
+            `;
+            container.appendChild(el);
+            setTimeout(() => el.remove(), 3000);
+        }
+        if (!document.getElementById('confetti-style')) {
+            const style = document.createElement('style');
+            style.id = 'confetti-style';
+            style.textContent = `
+                @keyframes fall {
+                    0%   { transform: translateY(0) rotate(0deg);   opacity:1; }
+                    100% { transform: translateY(105vh) rotate(720deg); opacity:0; }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+    })();
+    </script>
+    """, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────
+#  PERSONALIZED FEEDBACK ENGINE
+# ─────────────────────────────────────────
+def get_smart_feedback(is_correct, q_count, correct_count, level, subject):
+    """Generate personalized feedback based on student's journey"""
+    accuracy_so_far = (correct_count / q_count * 100) if q_count > 0 else 100
+    streak_count = correct_count
+
+    if is_correct:
+        if correct_count % 5 == 0 and correct_count > 0:
+            return "🏆", "#f7c06a", "TOPPER MOMENT", f"That's {correct_count} correct! In this moment, you are the smartest student in any classroom.", True
+        elif correct_count % 3 == 0 and correct_count > 0:
+            return "🔥", "#f7c06a", "ON FIRE!", f"3 in a row! Your brain is officially in FLOW STATE. Keep this energy!", False
+        elif accuracy_so_far == 100 and q_count >= 3:
+            return "⚡", "#7c6af7", "PERFECT RUN!", f"Perfect score so far in {subject}! You belong at the advanced level.", False
+        else:
+            msgs = [
+                ("🎉", "#6af7b8", "BRILLIANT!", "You knew that instantly. That's real understanding!"),
+                ("✅", "#6af7b8", "CORRECT!", "Your brain just made a new neural connection. That's growth!"),
+                ("💚", "#6af7b8", "NAILED IT!", "Clean answer. No hesitation. That's mastery!"),
+                ("🌟", "#6af7b8", "EXCELLENT!", "Keep going — you're building something real here."),
+            ]
+            e, c, t, m = msgs[q_count % len(msgs)]
+            return e, c, t, m, False
+    else:
+        if accuracy_so_far < 30 and q_count >= 3:
+            return "🧠", "#06b6d4", "BRAIN RESET MODE", "This topic needs more practice — that's totally normal. Every expert was once confused here.", False
+        else:
+            msgs = [
+                ("💡", "#f7c06a", "GREAT ATTEMPT!", "You tried. That's what separates learners from quitters."),
+                ("👏", "#f7c06a", "BRAVE TRY!", "Wrong answers teach more than easy wins. You're learning faster."),
+                ("🌱", "#f7c06a", "KEEP GROWING!", "Your brain is literally rewiring right now to remember this."),
+                ("🔑", "#f7c06a", "KEY INSIGHT!", "Now you know. And you won't forget it. That's how memory works."),
+            ]
+            e, c, t, m = msgs[q_count % len(msgs)]
+            return e, c, t, m, False
+
+# ─────────────────────────────────────────
+#  SCREEN 4: SESSION (FULL GAME EXPERIENCE)
 # ─────────────────────────────────────────
 def screen_session():
     subject = st.session_state["subject"]
     level = st.session_state["level"] or "beginner"
     q_count = st.session_state["q_count"]
+    points = st.session_state["session_points"]
+    correct_count = st.session_state["correct_count"]
     badge_class = level
 
+    # ── TOP BAR ──
     st.markdown(f"""
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
         <div>
             <span class="level-badge {badge_class}">{level.upper()}</span>
-            <span style="margin-left:0.75rem; color:#6b6b80; font-size:0.9rem;">{subject}</span>
+            <span style="margin-left:0.6rem; color:#6b6b80; font-size:0.85rem;">{subject}</span>
         </div>
-        <div style="font-family:'Space Mono',monospace; color:#f7c06a; font-size:0.9rem;">
-            🔥 {st.session_state['streak']} streak &nbsp; ⭐ {st.session_state['session_points']} pts
+        <div style="font-family:'Space Mono',monospace; font-size:0.85rem;">
+            <span style="color:#f7c06a;">🔥 {st.session_state['streak']}</span>
+            &nbsp;&nbsp;
+            <span style="color:#7c6af7;">Q{q_count+1}</span>
+            &nbsp;&nbsp;
+            <span style="color:#6af7b8;">⭐ {points}</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
+    # ── XP BAR ──
+    render_xp_bar(points)
+
+    # ── FLOW METER ──
     render_flow_meter(st.session_state["flow_score"])
 
+    # ── LOAD QUESTION ──
     if st.session_state["current_question"] is None:
-        with st.spinner("🤖 Generating your next question..."):
+        # Record starting level for Before/After mirror
+        if st.session_state["starting_level"] is None:
+            st.session_state["starting_level"] = level
+        # Record session start time
+        if st.session_state["session_start_time"] is None:
+            import time
+            st.session_state["session_start_time"] = time.time()
+        with st.spinner("🤖 Preparing your next challenge..."):
             q = get_next_question(subject, level)
-            st.session_state["asked_questions"].append(q.get("question", ""))
+            st.session_state["asked_questions"].append(q.get("question",""))
             st.session_state["current_question"] = q
             st.session_state["answer_submitted"] = False
             st.session_state["last_result"] = None
@@ -475,17 +840,59 @@ def screen_session():
 
     q = st.session_state["current_question"]
 
+    # ── QUESTION PHASE ──
     if not st.session_state["answer_submitted"]:
-        st.markdown(f"""
-        <div class="question-card">
-            <div style="font-size:0.75rem; font-family:'Space Mono',monospace; color:#6b6b80; margin-bottom:0.5rem;">
-                Q{q_count + 1} &nbsp;·&nbsp; {subject.upper()}
+
+        # 🤖 NOVA speaks at key moments
+        render_nova(
+            q_count, correct_count,
+            st.session_state.get("consecutive_wrong", 0),
+            st.session_state["flow_score"], level, subject,
+            st.session_state.get("mood", "😊 Energetic")
+        )
+
+        # 🎮 TINY LEVEL MAP
+        render_tiny_levels(subject, level, q_count)
+
+        # Brain Recovery Mode — if flow score very low
+        if st.session_state["flow_score"] >= 75:
+            st.markdown("""
+            <div style="background:rgba(247,106,106,0.1); border:1px solid #f76a6a;
+                border-radius:10px; padding:0.7rem 1rem; margin-bottom:0.75rem; font-size:0.85rem;">
+                😰 <strong style="color:#f76a6a;">Brain Recovery Mode</strong>
+                — Take a breath. This question is easier to rebuild your confidence.
             </div>
-            <div style="font-size:1.1rem; font-weight:500; line-height:1.6;">{q['question']}</div>
+            """, unsafe_allow_html=True)
+        elif q_count > 0 and correct_count == 0:
+            st.markdown("""
+            <div style="background:rgba(6,182,212,0.1); border:1px solid #06b6d4;
+                border-radius:10px; padding:0.7rem 1rem; margin-bottom:0.75rem; font-size:0.85rem;">
+                🧠 <strong style="color:#06b6d4;">Keep Going</strong>
+                — Every question you attempt makes your brain stronger. You're doing great.
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Question card with pulse animation
+        st.markdown(f"""
+        <style>
+        @keyframes slideIn {{
+            from {{ opacity:0; transform:translateY(12px); }}
+            to   {{ opacity:1; transform:translateY(0); }}
+        }}
+        .q-card-anim {{ animation: slideIn 0.35s ease; }}
+        </style>
+        <div class="question-card q-card-anim">
+            <div style="font-size:0.72rem; font-family:'Space Mono',monospace;
+                color:#6b6b80; margin-bottom:0.6rem; letter-spacing:0.1em;">
+                QUESTION {q_count+1} &nbsp;·&nbsp; {subject.upper()} &nbsp;·&nbsp; {level.upper()}
+            </div>
+            <div style="font-size:1.15rem; font-weight:600; line-height:1.65; color:#e8e8f0;">
+                {q['question']}
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("**Choose your answer:**")
+        # Answer buttons
         cols = st.columns(2)
         for i, opt in enumerate(q.get("options", [])):
             with cols[i % 2]:
@@ -494,65 +901,158 @@ def screen_session():
                     st.session_state["answer_submitted"] = True
                     st.session_state["last_result"] = "correct" if is_correct else "wrong"
                     st.session_state["current_answer"] = opt
+                    xp_gain = 15 if is_correct else 3
+                    st.session_state["session_points"] += xp_gain
                     if is_correct:
-                        st.session_state["session_points"] += 10
                         st.session_state["correct_count"] += 1
-                    st.session_state["flow_score"] = update_flow_score(is_correct, st.session_state["flow_score"])
+                        st.session_state["consecutive_wrong"] = 0
+                        if st.session_state.get("consecutive_wrong_prev", 0) >= 3:
+                            st.session_state["just_recovered"] = True
+                    else:
+                        st.session_state["consecutive_wrong"] = st.session_state.get("consecutive_wrong", 0) + 1
+                        st.session_state["consecutive_wrong_prev"] = st.session_state["consecutive_wrong"]
+                    st.session_state["flow_score"] = update_flow_score(
+                        is_correct, st.session_state["flow_score"])
                     st.session_state["q_count"] += 1
                     st.rerun()
+
+    # ── FEEDBACK PHASE ──
     else:
         result = st.session_state["last_result"]
-        msgs = REWARD_MESSAGES[result]
-        reward_msg = msgs[q_count % len(msgs)]
+        is_correct = result == "correct"
         explanation = q.get("explanation", "")
         correct_answer = q.get("answer", "")
 
-        # YOU ARE THE TOPPER moment
-        if st.session_state["correct_count"] > 0 and st.session_state["correct_count"] % 3 == 0 and result == "correct":
+        # Get smart personalized feedback
+        emoji, color, title, message, is_topper = get_smart_feedback(
+            is_correct, q_count, correct_count, level, subject)
+
+        # Confetti for correct answers
+        if is_correct:
+            confetti_js()
+
+        # TOPPER MOMENT — full screen celebration
+        if is_topper:
             st.markdown(f"""
-            <div style="background:linear-gradient(135deg,rgba(247,192,106,0.15),rgba(124,106,247,0.15));
-                border:2px solid #f7c06a; border-radius:16px; padding:1.5rem; text-align:center; margin-bottom:1rem;">
-                <div style="font-size:2.5rem;">🏆</div>
-                <div style="font-size:1.2rem; font-weight:800; color:#f7c06a; margin:0.5rem 0;">
-                    RIGHT NOW — YOU ARE THE TOPPER!
+            <style>
+            @keyframes topper {{
+                0%   {{ transform:scale(0.8); opacity:0; }}
+                60%  {{ transform:scale(1.05); }}
+                100% {{ transform:scale(1); opacity:1; }}
+            }}
+            .topper-card {{ animation: topper 0.5s ease; }}
+            </style>
+            <div class="topper-card" style="
+                background:linear-gradient(135deg,#1a1a2e,#2a1a3e);
+                border:2px solid #f7c06a; border-radius:20px;
+                padding:2rem; text-align:center; margin-bottom:1rem;
+                box-shadow:0 0 40px rgba(247,192,106,0.3);">
+                <div style="font-size:3.5rem; margin-bottom:0.5rem;">🏆</div>
+                <div style="font-size:1.5rem; font-weight:900; color:#f7c06a;
+                    font-family:'Space Mono',monospace; letter-spacing:0.05em;">
+                    YOU ARE THE TOPPER
                 </div>
-                <div style="color:#a8a8c0; font-size:0.9rem;">3 correct in a row! Your brain is absolutely on fire! 🔥</div>
-            </div>
-            """, unsafe_allow_html=True)
-        elif result == "correct":
-            st.markdown(f"""
-            <div class="reward-correct">
-                <div style="font-size:2rem; margin-bottom:0.5rem;">✅</div>
-                <div style="font-size:1.1rem; font-weight:700; color:#6af7b8;">{reward_msg}</div>
-                <div style="color:#a8a8c0; margin-top:0.5rem; font-size:0.9rem;">{explanation}</div>
-                <div style="margin-top:0.5rem; font-family:'Space Mono',monospace; color:#f7c06a; font-size:0.9rem;">+10 pts ⭐</div>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div class="reward-wrong">
-                <div style="font-size:2rem; margin-bottom:0.5rem;">💡</div>
-                <div style="font-size:1.1rem; font-weight:700; color:#f7c06a;">{reward_msg}</div>
-                <div style="color:#a8a8c0; margin-top:0.5rem; font-size:0.9rem;">{explanation}</div>
-                <div style="margin-top:0.5rem; color:#6b6b80; font-size:0.85rem;">Correct answer: <strong style="color:#f7c06a;">{correct_answer}</strong></div>
+                <div style="color:#a8a8c0; margin:0.75rem 0; font-size:1rem; line-height:1.5;">
+                    {message}
+                </div>
+                <div style="background:rgba(247,192,106,0.1); border-radius:10px;
+                    padding:0.5rem 1rem; display:inline-block;
+                    font-family:'Space Mono',monospace; color:#f7c06a; font-size:0.9rem;">
+                    +15 XP BONUS ⭐
+                </div>
             </div>
             """, unsafe_allow_html=True)
 
-        st.markdown("")
+        # Regular feedback card
+        elif is_correct:
+            st.markdown(f"""
+            <style>
+            @keyframes popIn {{
+                0%   {{ transform:scale(0.9); opacity:0; }}
+                100% {{ transform:scale(1); opacity:1; }}
+            }}
+            .reward-anim {{ animation: popIn 0.3s ease; }}
+            </style>
+            <div class="reward-anim" style="
+                background:linear-gradient(135deg,rgba(106,247,184,0.12),rgba(124,106,247,0.08));
+                border:1.5px solid #6af7b8; border-radius:16px;
+                padding:1.4rem; text-align:center; margin-bottom:1rem;
+                box-shadow:0 0 20px rgba(106,247,184,0.15);">
+                <div style="font-size:2.5rem; margin-bottom:0.4rem;">{emoji}</div>
+                <div style="font-size:1.2rem; font-weight:800; color:{color};
+                    font-family:'Space Mono',monospace; letter-spacing:0.03em;">{title}</div>
+                <div style="color:#c8c8d8; margin:0.6rem 0; font-size:0.95rem; line-height:1.5;">
+                    {message}
+                </div>
+                <div style="color:#6b6b80; font-size:0.8rem; margin-top:0.3rem;">
+                    {explanation}
+                </div>
+                <div style="margin-top:0.75rem; font-family:'Space Mono',monospace;
+                    color:#f7c06a; font-size:0.9rem; font-weight:700;">+15 XP ⭐</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Wrong answer — encouraging, never shaming
+        else:
+            st.markdown(f"""
+            <style>
+            @keyframes slideUp {{
+                from {{ opacity:0; transform:translateY(8px); }}
+                to   {{ opacity:1; transform:translateY(0); }}
+            }}
+            .wrong-anim {{ animation: slideUp 0.3s ease; }}
+            </style>
+            <div class="wrong-anim" style="
+                background:linear-gradient(135deg,rgba(247,192,106,0.1),rgba(6,182,212,0.05));
+                border:1.5px solid #f7c06a; border-radius:16px;
+                padding:1.4rem; margin-bottom:1rem;">
+                <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.75rem;">
+                    <span style="font-size:2rem;">{emoji}</span>
+                    <div>
+                        <div style="font-size:1.1rem; font-weight:800; color:{color};
+                            font-family:'Space Mono',monospace;">{title}</div>
+                        <div style="color:#c8c8d8; font-size:0.9rem; margin-top:0.2rem;">{message}</div>
+                    </div>
+                </div>
+                <div style="background:rgba(0,0,0,0.3); border-radius:10px; padding:0.75rem;">
+                    <div style="font-size:0.75rem; color:#6b6b80; margin-bottom:0.3rem;
+                        font-family:'Space Mono',monospace; letter-spacing:0.05em;">CORRECT ANSWER</div>
+                    <div style="font-size:1rem; color:#f7c06a; font-weight:700;">{correct_answer}</div>
+                    <div style="font-size:0.85rem; color:#a8a8c0; margin-top:0.3rem;">{explanation}</div>
+                </div>
+                <div style="margin-top:0.6rem; font-family:'Space Mono',monospace;
+                    color:#6b6b80; font-size:0.8rem;">+3 XP for trying 💪</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Session progress mini bar
+        if q_count > 0:
+            acc = int(correct_count / q_count * 100)
+            st.markdown(f"""
+            <div style="display:flex; justify-content:space-between; align-items:center;
+                margin-bottom:0.75rem; padding:0 0.2rem;">
+                <span style="font-size:0.8rem; color:#6b6b80;">Session accuracy</span>
+                <span style="font-family:'Space Mono',monospace; font-size:0.8rem;
+                    color:{'#6af7b8' if acc>=70 else '#f7c06a' if acc>=40 else '#f76a6a'};">
+                    {correct_count}/{q_count} = {acc}%
+                </span>
+            </div>
+            """, unsafe_allow_html=True)
+
         col1, col2 = st.columns([2, 1])
         with col1:
-            if st.button("➡️ Next Question", key="next_q"):
+            if st.button("➡️ Next Challenge", key="next_q"):
                 st.session_state["current_question"] = None
                 st.session_state["answer_submitted"] = False
                 st.rerun()
         with col2:
-            if st.button("🏁 End Session", key="end_session"):
+            if st.button("🏁 Finish", key="end_session"):
                 st.session_state["streak"] += 1
                 st.session_state["screen"] = "result"
                 st.rerun()
 
 # ─────────────────────────────────────────
-#  SCREEN 5: RESULTS
+#  SCREEN 5: RESULTS (GAME-STYLE END SCREEN)
 # ─────────────────────────────────────────
 def screen_result():
     q_total = st.session_state["q_count"]
@@ -560,44 +1060,106 @@ def screen_result():
     points = st.session_state["session_points"]
     streak = st.session_state["streak"]
     accuracy = int(correct / q_total * 100) if q_total > 0 else 0
+    level = st.session_state["level"] or "beginner"
 
+    # Auto confetti on results
+    if accuracy >= 70:
+        confetti_js()
+
+    # Performance tier
     if accuracy >= 80:
-        perf_msg, perf_color = "🚀 Outstanding! You're mastering this!", "#6af7b8"
-    elif accuracy >= 50:
-        perf_msg, perf_color = "🌊 Great session! You're building momentum!", "#7c6af7"
+        grade, grade_color, grade_msg = "S", "#f7c06a", "LEGENDARY PERFORMANCE"
+        sub_msg = "You belong at the top. This is what peak learning looks like."
+    elif accuracy >= 60:
+        grade, grade_color, grade_msg = "A", "#6af7b8", "EXCELLENT SESSION"
+        sub_msg = "Your brain worked hard today. You earned every point."
+    elif accuracy >= 40:
+        grade, grade_color, grade_msg = "B", "#7c6af7", "SOLID PROGRESS"
+        sub_msg = "You're building real knowledge. Come back tomorrow — it compounds."
     else:
-        perf_msg, perf_color = "🌱 Every session makes you stronger. Keep going!", "#f7c06a"
+        grade, grade_color, grade_msg = "C", "#06b6d4", "BRAVE ATTEMPT"
+        sub_msg = "Starting is the hardest part. You showed up. That's everything."
 
+    # Grade display
     st.markdown(f"""
-    <div style="text-align:center; padding:1.5rem 0 1rem;">
-        <div style="font-size:3rem;">🏆</div>
-        <h2 style="margin:0.5rem 0;">Session Complete!</h2>
-        <p style="color:{perf_color}; font-weight:600;">{perf_msg}</p>
+    <style>
+    @keyframes gradeIn {{
+        0%   {{ transform:scale(0) rotate(-180deg); opacity:0; }}
+        70%  {{ transform:scale(1.1) rotate(5deg); }}
+        100% {{ transform:scale(1) rotate(0deg); opacity:1; }}
+    }}
+    .grade-anim {{ animation: gradeIn 0.6s cubic-bezier(0.34,1.56,0.64,1); }}
+    </style>
+    <div style="text-align:center; padding:1.5rem 0 0.5rem;">
+        <div class="grade-anim" style="
+            display:inline-flex; align-items:center; justify-content:center;
+            width:90px; height:90px; border-radius:50%;
+            background:linear-gradient(135deg,{grade_color}22,{grade_color}44);
+            border:3px solid {grade_color};
+            font-family:'Space Mono',monospace; font-size:3rem; font-weight:900;
+            color:{grade_color}; margin-bottom:1rem;
+            box-shadow:0 0 40px {grade_color}44;">
+            {grade}
+        </div>
+        <div style="font-family:'Space Mono',monospace; font-size:1rem;
+            color:{grade_color}; letter-spacing:0.1em; font-weight:700;">{grade_msg}</div>
+        <div style="color:#6b6b80; font-size:0.9rem; margin-top:0.4rem;">{sub_msg}</div>
     </div>
     """, unsafe_allow_html=True)
 
+    # Stats grid
     st.markdown(f"""
-    <div class="score-card">
-        <div class="score-num">{accuracy}%</div>
-        <div style="color:#6b6b80; margin:0.5rem 0 1.5rem; font-size:0.9rem;">accuracy</div>
-        <div style="display:flex; justify-content:center; gap:2rem;">
-            <div><div style="font-family:'Space Mono',monospace; font-size:1.4rem; color:#f7c06a;">{points}</div><div style="color:#6b6b80; font-size:0.8rem;">points</div></div>
-            <div><div style="font-family:'Space Mono',monospace; font-size:1.4rem; color:#7c6af7;">{q_total}</div><div style="color:#6b6b80; font-size:0.8rem;">questions</div></div>
-            <div><div style="font-family:'Space Mono',monospace; font-size:1.4rem; color:#f76a6a;">🔥{streak}</div><div style="color:#6b6b80; font-size:0.8rem;">day streak</div></div>
+    <div style="display:grid; grid-template-columns:1fr 1fr 1fr;
+        gap:0.75rem; margin:1.25rem 0;">
+        <div style="background:#1a1a24; border:1px solid #2a2a38; border-radius:14px;
+            padding:1rem; text-align:center;">
+            <div style="font-family:'Space Mono',monospace; font-size:1.8rem;
+                font-weight:700; color:#6af7b8;">{accuracy}%</div>
+            <div style="color:#6b6b80; font-size:0.75rem; margin-top:0.2rem;">ACCURACY</div>
+        </div>
+        <div style="background:#1a1a24; border:1px solid #2a2a38; border-radius:14px;
+            padding:1rem; text-align:center;">
+            <div style="font-family:'Space Mono',monospace; font-size:1.8rem;
+                font-weight:700; color:#f7c06a;">{points}</div>
+            <div style="color:#6b6b80; font-size:0.75rem; margin-top:0.2rem;">XP EARNED</div>
+        </div>
+        <div style="background:#1a1a24; border:1px solid #2a2a38; border-radius:14px;
+            padding:1rem; text-align:center;">
+            <div style="font-family:'Space Mono',monospace; font-size:1.8rem;
+                font-weight:700; color:#f76a6a;">🔥{streak}</div>
+            <div style="color:#6b6b80; font-size:0.75rem; margin-top:0.2rem;">DAY STREAK</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("")
-    level = st.session_state["level"]
-    if accuracy >= 80 and level == "beginner":
-        st.info("🎯 You're ready to level up! Try **Moderate** next session.")
-    elif accuracy < 40 and level == "advanced":
-        st.info("💡 Let's consolidate. Try **Moderate** level next session.")
+    # XP bar on result screen
+    render_xp_bar(points)
 
+    # ── BEFORE/AFTER MIRROR ──
+    starting_level = st.session_state.get("starting_level") or level
+    render_before_after(
+        starting_level, level,
+        0, accuracy,
+        q_total, st.session_state.get("subject", "")
+    )
+
+    # Smart next step
+    st.markdown("**🎯 Your next move:**")
+    if accuracy >= 80 and level == "beginner":
+        st.success("🚀 You dominated Beginner! Start your next session at **Moderate** level.")
+    elif accuracy >= 80 and level == "moderate":
+        st.success("⚡ You're crushing Moderate! Try **Advanced** next session.")
+    elif accuracy < 40 and level == "advanced":
+        st.info("💡 Advanced is tough — try **Moderate** to build a stronger foundation.")
+    elif accuracy < 40:
+        st.info("🌱 Keep showing up daily. Even 5 questions a day rewires your brain in 30 days.")
+    else:
+        st.success(f"🌊 Great session! Keep going at **{level.title()}** level tomorrow.")
+
+    st.markdown("")
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🔄 New Session"):
+        if st.button("🔄 Play Again"):
             for k in ["current_question","answer_submitted","last_result","q_count",
                       "correct_count","session_points","flow_score","level_detect_questions",
                       "level_q_index","level_answers","mood","level","asked_questions","asked_topics"]:
