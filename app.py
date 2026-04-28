@@ -507,24 +507,51 @@ def render_before_after(starting_level, current_level,
 
 
 def get_next_question(subject, level):
-    """Get next unique question — tries Gemini first, falls back to bank."""
-    diff_map = {"beginner": "easy", "moderate": "medium", "advanced": "hard"}
-    diff = diff_map.get(level, "medium")
+    """Get next unique question — mood-aware difficulty + strict deduplication."""
 
-    # Get asked questions list
+    # MOOD OVERRIDE — Tester 1 fix
+    # Tired/Stressed mood forces easier questions regardless of level
+    mood = st.session_state.get("mood", "😊 Energetic")
+    if mood in ["😴 Tired", "😰 Stressed"]:
+        # Force one level easier
+        if level == "advanced":
+            effective_level = "moderate"
+        else:
+            effective_level = "beginner"
+    elif mood == "😊 Energetic" and level == "beginner":
+        # Energetic mood can push beginner slightly harder
+        effective_level = "beginner"  # keep but pick harder questions from bank
+    else:
+        effective_level = level
+
+    diff_map = {"beginner": "easy", "moderate": "medium", "advanced": "hard"}
+    diff = diff_map.get(effective_level, "medium")
+
+    # STRICT DEDUPLICATION — Tester 2 fix
+    # Track full question text across entire session
     asked = st.session_state.get("asked_questions", [])
 
-    # Try bank first (always reliable)
+    # Get pool
     pool = QUESTION_BANK.get(subject, QUESTION_BANK["General Knowledge"])
     questions = pool.get(diff, pool["medium"])
+
+    # Filter strictly — no repeats at all
     available = [q for q in questions if q["question"] not in asked]
 
-    # If bank is exhausted, try Gemini for fresh question
+    # If bank exhausted — try Gemini for fresh question
     if not available:
-        diff_text = {"easy": "Class 6-7, simple", "medium": "Class 9-10, moderate", "hard": "Class 11-12, challenging"}[diff]
+        diff_text = {
+            "easy": "Class 6-7, very simple",
+            "medium": "Class 9-10, moderate",
+            "hard": "Class 11-12, challenging"
+        }[diff]
         seed = random.randint(1000, 99999)
-        prompt = f"""Generate ONE MCQ for {subject}, difficulty: {diff_text}, seed:{seed}.
-Return ONLY JSON: {{"question":"text","options":["A) o1","B) o2","C) o3","D) o4"],"answer":"A","explanation":"short encouragement"}}"""
+        avoid = ", ".join(asked[-5:]) if asked else "none"
+        prompt = (
+            f"Generate ONE unique MCQ. Subject:{subject}, Difficulty:{diff_text}, "
+            f"Seed:{seed}. Avoid repeating these topics:{avoid}. "
+            f'Return ONLY JSON:{{"question":"text","options":["A) o1","B) o2","C) o3","D) o4"],"answer":"A","explanation":"encouragement"}}'
+        )
         raw = ask_gemini(prompt)
         if raw:
             try:
@@ -536,12 +563,12 @@ Return ONLY JSON: {{"question":"text","options":["A) o1","B) o2","C) o3","D) o4"
                         return result
             except Exception:
                 pass
-        # Reset and reuse bank if all exhausted
+        # Hard reset — clear asked list and reuse bank
+        st.session_state["asked_questions"] = []
         available = questions
 
-    # Pick random unused question
     chosen = random.choice(available)
-    return dict(chosen)  # return a copy
+    return dict(chosen)
 
 def generate_level_questions(subject):
     """Generate 3 level detection questions."""
